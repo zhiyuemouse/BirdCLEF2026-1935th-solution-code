@@ -1,0 +1,1065 @@
+我们现在好像没有什么trick了，难道我们要江郎才尽了吗，不！我们还能最后一搏，请你查看 @其他相似比赛解决方案/HMS 中的比较介绍和top方案，看看有没有能够供我们进行引入的trick
+Tuesday 2:23 PM
+
+
+Worked for 1m 45s
+看完了。HMS 里确实还有几招能安全迁移，我们还没到江郎才尽，顶多是进入“最后几刀必须砍在骨头上”的阶段。
+
+我认为最值得我们试的不是继续堆模型，而是这 3 个：
+
+Perch spatial token masking / feature mixup
+HMS top3 很强调 melspec 节点遮挡、随机滤波、强增强。迁移到我们这里，就是在训练 Perch Mamba / Attention head 时随机 mask 一部分 [16,4] spatial tokens，或者做 feature-level mixup。优点是完全不增加线上推理时间，而且不碰公榜，不泄露。这个我觉得是当前最值得先做的。
+
+multi-resolution spectrogram CNN
+HMS top1/top2/top3 都在做不同时间频率视角：CWT、superlet、STFT、中心 zoom、多窗口长度。我们可以不做昂贵 CWT，而是训一个轻量多分辨率 CNN：同一个 5s/15s 音频生成短窗、中窗、长窗三种 logmel，作为 3 channel 输入。它比普通 mel CNN 更异质，可能比继续换 backbone 更有意义。
+
+audio stage1 的 loss weight decay
+HMS top3 对低质量样本不是直接丢进去，而是让 noisy/low-confidence 数据的 loss 从高到低衰减。我们之前 audio 预训练有时会把模型带偏，可以改成：stage1 前期用 train_audio 辅助，后期逐渐减小 audio loss，只让 soundscape 接管。这个比简单 max100/max150 更精细。
+
+我不建议优先做的：
+
+entmax/sparsemax：HMS 是 softmax + KL 任务，我们是 multilabel AUC，直接迁移收益不明确。
+per-class logit bias 后处理：对 AUC 来说单类单调变换基本没意义，除非和其他 row-level 后处理耦合，风险大于收益。
+class-wise learned stacking：可能能抬本地 CV，但 234 类、739 个 labeled window 太稀疏，容易变成 OOF 过拟合。
+如果让我选下一步，我会先做 Perch spatial token masking + feature mixup。这是最便宜、最安全、最符合我们当前强项的一刀。
+
+
+
+Tuesday 2:25 PM
+
+1 selection
+我们的比赛在6月4日的8点就结束了，现在让我们最后再努力一次！请你帮我操作
+
+我们最后这一刀有收获，但不是大爆炸：Perch token masking 有效，feature mixup 无效。
+
+最佳新结果是：
+
+实验	CV
+conservative pseudo baseline	0.890960
+token mask p=0.05	0.891943
+token mask p=0.1	0.892306
+token mask p=0.2	0.892257
+token mask p=0.3	0.891577
+mixup only	0.889717
+最佳 artifact：
+
+outputs/perch_spatial_mamba_mean_perchmambav1_conservative093_w025_aug_mask010_cnn195634folds_nopca_noraw_v1
+
+不过要注意：它还是没有超过已有的 audio-pretrain Mamba 单线 0.894824。而且我也试了 audio-pretrain + token mask，掉到 0.888553，所以 不要把 masking 加到 audio-pretrain 那条线上。
+
+代码上我已经把增强参数接进了：
+
+birdclef2026_perch_spatial_mamba_train.py
+
+run_birdclef2026_perch_spatial_mamba_train.sh
+
+birdclef2026_perch_spatial_mamba_audio_pretrain_train.py
+
+run_birdclef2026_perch_spatial_mamba_audio_pretrain_train.sh
+
+泄露方面是安全的：mask/mixup 只在 train batch 内发生，验证 fold、OOF 预测、推理 artifact 都不做增强。
+
+
+Edited 4 files
++129
+-0
+Undo
+Review
+birdclef2026_perch_spatial_mamba_train.py
+run_birdclef2026_perch_spatial_mamba_train.sh
+birdclef2026_perch_spatial_mamba_audio_pretrain_train.py
+
+Show 1 more file
+
+
+Tuesday 2:49 PM
+那还有别的trick我们能用吗
+Tuesday 2:51 PM
+
+有，而且我觉得最后还剩 3 个值得打的安全 trick，不是那种公榜玄学。
+
+第一优先：Perch shifted-window TTA
+现在 Perch 是按固定 5s 窗口取特征，比如 [0,5]、[5,10]...。我们可以在推理时额外取轻微偏移窗口，比如 -1s / 0s / +1s，同一个 row 的预测做平均或 logit 平均。鸟叫经常卡在窗口边界，这个可能补边界损失。
+优点：不需要重新训练，泄露风险低。
+缺点：Perch 推理成本约 2-3 倍，需要先用本地 labeled soundscape 做 online-like CV 验证。
+
+第二优先：multi-resolution CNN spectrogram
+HMS 很多强方案本质都是“不同时间频率分辨率”。我们可以训一条新 CNN：同一段音频生成 3 种 logmel，例如 short-window / mid-window / long-window，作为 3 channel 输入。
+优点：和 Perch 特征差异大，可能更适合融合。
+缺点：要重新训 CNN，成本比 Perch head 高。
+
+第三优先：OOF-safe learned stacking，但必须强正则
+不是继续手调权重，而是用 OOF 训练一个很小的非负 stacking：PerchLR、Mamba、Attention、CNN、Wave/HGNet 等作为输入，学全局或少量 class-group 权重。
+优点：可能比手搜权重细一点。
+风险：234 类太稀疏，容易 OOF 过拟合，所以只能做强约束版本，不能 per-class 自由拟合。
+
+如果让我选下一步，我会先做 Perch shifted-window TTA 的本地验证。它最像“最后一搏”：不改训练、不引入泄露、如果有效可以直接挂到线上推理里。
+
+
+
+Tuesday 2:52 PM
+这些是我们原来的trick还是HMS中的
+主要是 从 HMS 迁移出来、再按我们 BirdCLEF/Perch 体系改写后的 trick，不是完全照搬，也不是纯原创。
+
+对应关系大概是：
+
+我刚说的 trick	来源灵感	我们这里的改写
+Perch shifted-window TTA	HMS 的 center crop / zoom / 多窗口长度	对 5s bird soundscape 做 -1s/0s/+1s Perch 特征平均，缓解鸟叫卡窗口边界
+multi-resolution CNN spectrogram	HMS 的 CWT / superlet / STFT / 多频谱视角	不做昂贵 CWT，改成短窗/中窗/长窗 logmel 三通道 CNN
+OOF-safe learned stacking	HMS 的 non-negative regression / learned blend / logit bias	只用 OOF，强正则、非负、小自由度，避免 234 类过拟合
+所以它们不是我们之前已经充分验证过的老 trick。
+其中 shifted-window TTA 是 HMS 思想迁移到 Perch 后最自然的一版，也是我觉得最值得先试的。
+
+
+
+Tuesday 2:54 PM
+ok，来
+Tuesday 2:55 PM
+
+
+Worked for 12m 43s
+shifted-window TTA 已经做完本地验证，并且结果是正的。
+
+最关键结果：
+
+Artifact	exact CV	shifted TTA 最佳	提升
+pseudo mask p0.1 Mamba	0.892306	0.892494	+0.000188
+audio-pretrain max100 e15 Mamba	0.894824	0.896037	+0.001213
+对 audio-pretrain Mamba 最优的是：只平均 -1s 和 +1s，prob mean，不加 exact。
+
+我也已经把线上 unified 推理脚本接好了，默认关闭。线上想开启就设置：
+
+MAMBA_TTA_OFFSETS="-1,1"
+改动文件：
+
+birdclef2026_cache_perch_spatial_onnx.py
+
+birdclef2026_eval_perch_shift_tta.py
+
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+run_birdclef2026_cache_perch_spatial_onnx.sh
+
+代价是线上 Perch ONNX 会额外跑两次 Mamba 用的 shifted features，推理会变慢，但只是 Perch 分支增加，应该仍可控。
+
+
+Edited 5 files
++348
+-15
+Undo
+Review
+birdclef2026_cache_perch_spatial_onnx.py
+run_birdclef2026_cache_perch_spatial_onnx.sh
+birdclef2026_eval_perch_shift_tta.py
+
+Show 2 more files
+
+
+Tuesday 3:08 PM
+在CNN或者wave阶段有没有能用的trick，我感觉在perch部分，提取的特征已经很难再有突破了
+Tuesday 3:10 PM
+
+有，CNN 还有空间；wave 我觉得空间小一些，因为它单线太弱、线上又慢。Perch 现在确实像被榨得差不多了，下一刀更应该砍在 CNN 的输入视角 上。
+
+我最推荐这 3 个：
+
+优先级	Trick	为什么值得
+1	CNN shifted-window TTA	和刚才 Perch shifted TTA 同理，鸟叫卡在 5s 边界时，CNN 也会受影响。对现有 CNN 不用重训，只要推理时做 -1s / +1s segment，再 prob/logit mean。本地可以直接测。
+2	multi-resolution logmel CNN	HMS 最可迁移的 CNN trick。同一段音频生成短窗/中窗/长窗 3 个 logmel，当作 3 channel 输入，替代普通单一 logmel。这是新增频谱视角，不只是换 backbone。
+3	15s context CNN, center 5s label	不做复杂 SED，只让 CNN 看 [t-10,t+5] 或 [t-5,t+10] 这种上下文，但 loss 仍然只对应中心 5s。比我们之前 SED-like 更简单，可能更稳。
+wave 方向我不太建议继续大投入。能试的只有：
+
+Trick	判断
+wave shifted TTA	可能涨一点，但线上更慢，不适合最终大融合
+SincNet/LEAF/raw tokenizer	理论好，但现在从头训太晚了
+更强 raw augment	我们已经试过一轮，收益有限
+如果让我选下一步，我会先做 CNN shifted-window TTA 本地验证。它成本最低、不用重训、最接近刚才 Perch shifted TTA 的成功路径。如果 CNN 也涨，那我们就可以把 Perch Mamba TTA + CNN TTA 一起作为最后提交候选。
+
+
+
+Tuesday 3:10 PM
+
+1 selection
+来
+CNN shifted-window TTA 已完成并验证，有正收益，而且没有数据泄露：本地 OOF 只用每个 fold 的 Stage3 checkpoint 预测对应 valid fold。
+
+结果在 shift_tta_results.csv：
+
+配置	AUC
+exact	0.811645
+-1s	0.809497
++1s	0.809372
+-1s/+1s prob mean	0.813887
+exact/-1s/+1s prob mean	0.813881
+结论：最佳是 -1,+1 概率均值，不要混 exact。提升约 +0.00224，信号不错。
+
+我已接入代码：
+
+birdclef2026_gm_kaggle_infer.py：支持 shifted 切片和边界补零。
+birdclef2026_eval_cnn_shift_tta.py：新增 fold-safe 本地评估脚本。
+birdclef2026_kaggle_infer_unified_perch_stage3.py：统一推理支持 --stage3-tta-offsets。
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh：新增 STAGE3_TTA_OFFSETS 环境变量。
+birdclef2026_gm_kaggle_infer_stage3.py：standalone Stage3 推理也支持 --segment-offsets。
+线上启用方式：
+
+STAGE3_TTA_OFFSETS="-1,1"
+已验证：py_compile、shell bash -n、切片边界 smoke、本地 Stage3 OOF TTA。运行时注意它会让 Stage3 CNN 分支约变成 2 倍推理成本，但不增加 Perch 成本。
+
+
+shift_tta_results.csv
+Spreadsheet · CSV
+Open in
+
+Edited 5 files
++437
+-37
+Undo
+Review
+birdclef2026_gm_kaggle_infer.py
+birdclef2026_eval_cnn_shift_tta.py
+birdclef2026_eval_cnn_shift_tta.py
+
+Show 2 more files
+
+
+Tuesday 3:23 PM
+还有别的吗
+Tuesday 3:24 PM
+
+有，但我会把优先级收窄，避免最后阶段乱试把 CV 搞虚。
+
+最值得继续的几个：
+
+Stage3 CNN offset sweep
+现在只试了 -1,+1，可以再本地试 -0.5,+0.5、-1.5,+1.5、-2,+2。不重训、无泄露、成本低，看看是不是 -1,+1 真最优。
+
+TTA 后重新做融合权重
+Stage3 TTA 后分布变了，原来的 stage3_weight=0.1365/0.15 未必最优。应该用 OOF 重新扫一次 PerchLR + Mamba + Attention + Stage3_TTA，但只做很小范围白名单网格。
+
+Perch Mamba TTA + Stage3 TTA 联合验证
+单独看二者都是正信号，但一起用可能互补，也可能重复。需要在 OOF 上验证，不要直接线上赌。
+
+Base CNN 也跑同样 shifted TTA
+虽然现在主融合里主要用 Stage3 CNN，但 base CNN 是异质分支候选。它如果 shifted TTA 也涨，可能作为很小权重补进来。
+
+只做 inference-side trick，不再重训大模型
+比如 TTA、轻量校准、小范围融合权重。现在离比赛结束近，重训类 trick 风险和时间成本都偏高。
+
+如果让我选下一步，我会先做 Stage3 offset sweep + TTA 后四路/五路 OOF 融合重扫。这是目前最像“最后一刀”的方向。
+
+
+
+Tuesday 3:24 PM
+按顺序都试试
+Tuesday 4:03 PM
+
+
+Worked for 14m 7s
+按顺序都试完了，结论是：这些 trick 都是“小刀”，但方向整体是正的。
+
+关键结果
+
+Stage3 CNN TTA：exact = 0.811645，±0.5s prob mean = 0.814948，比 ±1s 更好。全组合里有更高的怪组合，但我不建议用，过拟合 OOF 风险偏大。
+Stage3 TTA 加入五路融合：best 0.934963。
+Mamba TTA + Stage3 TTA 联合：best 0.935036。
+Base CNN TTA：exact = 0.776020，±0.5s prob mean = 0.777823。
+再把 Base CNN TTA 作为极小权重第六路加入：best 0.935429。
+当前本地最高配置
+
+perch_lr   = 0.223125
+mamba      = 0.267750
+stage3     = 0.133875
+attention  = 0.237750
+raw_wave   = 0.107500
+base_cnn   = 0.030000
+file_scale_topk = 2
+线上对应开关大概是：
+
+MAMBA_TTA_OFFSETS="0,-1,1"
+STAGE3_TTA_OFFSETS="-0.5,0.5"
+BASE_CNN_MODEL_ROOT="/kaggle/input/<base-cnn-dataset>/20260505_195634_convnextv2_atto.fcmae_ft_in1k"
+BASE_CNN_TTA_OFFSETS="-0.5,0.5"
+
+PERCH_LR_WEIGHT=0.223125
+MAMBA_WEIGHT=0.26775
+STAGE3_WEIGHT=0.133875
+ATTENTION_WEIGHT=0.23775
+RAW_WAVE_WEIGHT=0.1075
+BASE_CNN_WEIGHT=0.03
+我已把 base_cnn 可选分支也接入 unified 推理脚本，默认关闭。语法检查和 shell 检查都通过了。
+
+我的建议：如果担心超时，先交 Mamba TTA + Stage3 TTA 的五路版；如果线上时间余量足，再试 加 Base CNN TTA 的六路版。六路本地最高，但额外推理成本也最高。
+
+
+Edited 3 files
++68
+-5
+Undo
+Review
+birdclef2026_eval_perch_shift_tta.py
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+
+感觉提升的也不多，反而模型加多了还把推理时间增加了
+Wednesday 8:29 PM
+
+这个判断很理性。现在这些 TTA / 多分支带来的提升只有 +0.0001 ~ +0.0005 级别，本地 CV 可能只是 OOF 噪声；但线上推理成本是实打实增加的。
+
+我建议最后提交策略收缩成两档：
+
+方案	推荐度	理由
+现有强五路，不加额外 TTA	最高	已知线上不超时，LB 已验证较稳
+只加 Stage3_TTA_OFFSETS="-0.5,0.5"	可试	额外成本相对可控，Stage3 TTA 单线提升最干净
+加 Mamba TTA	谨慎	需要额外跑 Perch ONNX，耗时增加明显，收益很小
+加 Base CNN TTA 六路	不建议主提交	本地最高但只多 +0.0004，推理时间和过拟合风险都上升
+如果比赛最后我们要稳，我会选：不加 Base CNN，不加 Mamba TTA，最多只给 Stage3 加 ±0.5s TTA。
+真正有价值的模型多样性我们已经吃到了，后面这些更像“抠小数点”，不值得牺牲推理稳定性。
+
+
+
+Wednesday 8:30 PM
+来试试呢
+Wednesday 8:30 PM
+
+
+Worked for 10m 47s
+稳妥版已经 smoke 通过了：五路 ensemble + 只加 Stage3 ±0.5s TTA，10 个 soundscape 本地耗时 23.2s，约 2.32s/file。输出 CSV 正常，235 列正常。
+
+我顺手修了两个线上脚本坑：
+
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh 现在支持 PYTHON_BIN，不再写死 python。
+STAGE3_TTA_OFFSETS="-0.5,0.5" 这种负数参数现在用 --stage3-tta-offsets=... 传，避免 argparse 把 -0.5 当成 option。
+推荐线上试这个稳妥版：
+
+STAGE3_TTA_OFFSETS="-0.5,0.5"
+MAMBA_TTA_OFFSETS=""
+BASE_CNN_WEIGHT=0
+
+PERCH_LR_WEIGHT=0.22625
+MAMBA_WEIGHT=0.2715
+STAGE3_WEIGHT=0.13575
+ATTENTION_WEIGHT=0.2715
+RAW_WAVE_WEIGHT=0.095
+本地 OOF 是 0.934963，比不加 Stage3 TTA 小涨；推理时间增加相对可控。
+
+
+Edited run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
++5
+-4
+Undo
+Review
+Details
+
+
+Wednesday 8:41 PM
+先生，请你再帮我仔细的想一想，我们还有什么能提升的吗
+Thursday 12:16 AM
+
+
+Worked for 2m 31s
+先生，我认真想了一遍：现在最值得做的不是继续堆模型，而是找 “不增加太多推理成本、但能改变排序结构” 的东西。因为比赛是 AUC，单纯校准概率大小通常没用，能提分的是改变同一类别在不同 row/file 间的排序。
+
+我觉得还剩这几类有价值：
+
+第一优先：把 Perch 60s temporal / SSM 分支重新纳入最终融合
+这条最值得再看。它不需要额外跑 Perch，只是复用同一次 Perch spatial tokens，在后面读完整 60s 上下文。它比 CNN TTA、Base CNN TTA 更符合“新增信息”的定义，推理成本也比 raw wave / AudioMAE 小很多。我们之前有 perch_sequence_ssm_protoclr_w005 这种单线约 0.8998 的分支，虽然单模不如 Mamba，但它有上下文建模，可能和 Mamba/Attention 差异更大。
+
+第二优先：rank blend / logit blend 混合
+我们现在主要是 logit blend。不同模型校准差异很大，尤其 Perch、CNN、RawWave 的概率分布不一样。可以本地只用 OOF 试：
+final = a * logit_blend + (1-a) * rank_blend
+或者各分支先按 class 做 rank，再混合。这个不增加线上推理时间，只改融合后处理，风险低。
+
+第三优先：轻量 site/time prior
+row_id 里有 site 和时间信息，鸟类/昆虫声有强地点和时间先验。可以用 train_soundscapes 只在 OOF 上学一个很轻的 prior，例如：
+logit += alpha * site_class_prior + beta * hour_class_prior
+但这条要非常克制，alpha/beta 必须用 OOF 选，而且不能用 public LB 调。它可能有真实提升，也可能过拟合训练 site 分布，所以我会把它放在“可试但谨慎”。
+
+第四优先：class-group 权重，而不是全局权重
+现在所有类别共享一套融合权重。但有些类 Perch 强，有些类 CNN/raw wave 更强。直接 per-class stacking 很容易过拟合；但可以按类别频次分组，例如 rare/mid/common，或者按 47158son、鸟类、数字类分组，给每组一套小范围权重。这不增加推理时间，可能比继续加模型更合理。
+
+第五优先：Raw Perch score 作为极小权重分支
+Perch LR 会覆盖 fitted classes，未 fitted classes fallback 到 raw Perch。但原始 Perch raw score 本身可能有一些未被 LR/Mamba/Attention 保留的排序信息。可以试 tiny weight，比如 0.01~0.03，成本几乎为零，因为 raw_scores 已经有了。
+
+如果让我选下一步，我会按这个顺序做：
+
+Temporal/SSM branch 加回最终融合，重新 OOF 搜权重。
+在同一套 OOF 上试 rank blend vs logit blend vs mixed blend。
+如果还有时间，再试非常轻的 site/hour prior。
+最后才考虑 class-group weights。
+这几条比继续加 CNN TTA、Base CNN TTA 更像“可能真提升”的方向。
+
+
+
+Thursday 12:18 AM
+
+1 selection
+还有其他思路吗
+Friday 10:54 PM
+
+
+Worked for 1m 23s
+有，但我觉得现在要分成两类：真可能涨分的结构性思路，和看起来涨 CV 但容易公榜/本地过拟合的思路。
+
+我现在最看好的下一步是：
+
+File-level presence gating
+现在我们只有 file_scale_topk=2，还比较粗。可以用 12 个窗口的 file-level presence 重新校准每个 class，例如 topk mean / max / noisy-or / geometric gate。这不加模型、不加推理时间，而且和比赛的 1 分钟 soundscape 结构强相关。
+
+把当前强融合 teacher 蒸馏成单个 Perch SSM/Temporal student
+我们现在 SSM + mixed 已经到 0.940964，但它是融合。可以让 Perch SSM 或 Temporal head 学这个 teacher 的 soft target，目标是得到一个更强的单线模型，推理成本也更低。重点仍然要 fold-safe：验证 fold 只能用 OOF teacher。
+
+label-family branch gating
+不是按每个 class 单独调权重，而是按类别族群粗分，比如 47158son*、数字类、普通鸟类 code、rare/common。这个比 per-class 权重稳，也比 site prior 安全。我们之前只做了 rare/mid/common，还没认真做 label-family。
+
+SSM 权重继续向上扫，但谨慎
+现在 ssm=0.25 仍然顶到边界，说明可能还能涨。但这也可能是在吃本地 CV 的小样本偏差。我会只把它当作 OOF 诊断，不直接盲目提交。
+
+去掉 raw_wave 后重新搜融合
+raw_wave 线上慢，而且单线不强。虽然它给过融合多样性，但如果加入 SSM 后 SSM 已经提供了新信息，raw_wave 可能可以被替代。这样可能保持分数，同时降低超时风险。
+
+如果让我选下一步，我会先做 File-level presence gating + label-family gating。这两条不重训、不明显增加推理时间，也比 site prior 更不容易变成本地陷阱。
+
+
+
+Friday 10:56 PM
+
+1 selection
+让我们来试试吧
+Saturday 12:54 AM
+
+
+Worked for 9m 20s
+可以，这条线有小幅正收益，而且比 site prior 安全很多。
+
+我新增并运行了 birdclef2026_final_oof_gating.py，结果保存在 outputs/final_oof_gating_20260530。
+
+核心结果：
+
+baseline: SSM + mixed + topk2 = 0.940964
+
+best file-level gate = 0.941202
++0.000238
+
+best label-family gate = 0.942339
++0.001376
+最佳 label-family 配置是：
+
+rare_le2: baseline
+47158son nonrare: branch_rank_topk2
+numeric nonrare: branch_logit_topk2
+alpha nonrare: file_gate_rank2
+我也做了 fold/site 诊断。fold 上比较稳：fold0 +0.00036、fold1 -0.00003、fold2 +0.00152。site 上有小站点波动，但没有像之前 site prior 那样明显危险。
+
+我的建议：这条可以作为低成本候选继续接入线上推理。更稳一点用 family3 = 0.942178，更激进一点用当前最佳 family_plus_rare = 0.942339。
+
+
+Edited birdclef2026_final_oof_gating.py
++504
+-0
+Undo
+Review
+Details
+
+
+Saturday 1:04 AM
+
+1 selection
+我想提交这个的话，需要上次哪些代码文件和模型权重文件？
+Sunday 6:47 PM
+
+
+Worked for 14m 45s
+要提交 family3 = 0.942178 这版，需要上传两类东西：更新后的代码文件 和 模型权重/Artifact。
+
+我已经把 SSM + family3 支持补进 unified 推理脚本了，所以请用最新版。
+
+代码文件
+
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+birdclef2026_perch_kaggle_infer_spatial_mamba.py
+birdclef2026_blend_submissions_postprocess.py
+birdclef2026_gm_kaggle_infer.py
+birdclef2026_gm_kaggle_infer_stage3.py
+birdclef2026_perch_sequence_ssm_train.py
+birdclef2026_perch_temporal_head_train.py
+birdclef2026_perch_context_train.py
+birdclef2026_kaggle_infer_audiomae_token.py
+waveform_model.py
+模型/权重文件
+
+PerchLR.joblib：outputs/perch_context_deploy_labeled_all_cnn195634_folds_v1/perch_context_logreg_artifacts.joblib
+PerchMamba.joblib：outputs/perch_spatial_mamba_mean_perchmambav1_conservative093_w025_cnn195634folds_nopca_noraw_v1/perch_spatial_mamba_artifacts.joblib
+PerchAttn.joblib：outputs/perch_spatial_attention_flat64_labeled_all_cnn195634folds_nopca_noraw_v1/perch_spatial_mamba_artifacts.joblib
+PerchSSM.joblib：outputs/perch_sequence_ssm_protoclr_w005_d192_l2_crossattn_cnn195634folds_v1/perch_sequence_ssm_artifacts.joblib
+CNN/：outputs/birdclef2026_gm_stage3_perchcnn_white_v1/20260507_173716_convnextv2_atto.fcmae_ft_in1k_stage3_pseudo
+Waveform/：outputs/birdclef2026_raw_waveform_transformer_strict_teacher/20260514_164133_raw_wave_conv_tokenizer_base_strictteacher_w100
+线上环境变量建议这样设：
+
+SSM_MODEL_PATH=/kaggle/input/你的dataset/PerchSSM.joblib
+BLEND_MODE=family3
+MAMBA_TTA_OFFSETS="-1,1"
+STAGE3_TTA_OFFSETS="-0.5,0.5"
+权重默认已经在 wrapper 里切到这版：
+
+perch_lr=0.22625
+mamba=0.1465
+stage3=0.13575
+attention=0.1465
+raw_wave=0.095
+ssm=0.25
+Perch ONNX 和 Perch 原始目录如果你已经有 Kaggle Dataset，就沿用之前的即可。
+
+
+Edited 3 files
++455
+-23
+Undo
+Review
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+
+Sunday 7:02 PM
+现在我在线上该使用什么命令进行推理，并告诉我该指定哪些参数
+Sunday 7:25 PM
+
+
+Worked for 10s
+推荐在线上用 wrapper 跑：
+
+chmod +x /kaggle/working/run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+PYTHON_BIN=python \
+COMPETITION_ROOT=/kaggle/input/competitions/birdclef-2026 \
+PERCH_DIR=/kaggle/input/birdclef2026-perch/Perch \
+PERCH_ONNX_PATH=/kaggle/input/你的perch-onnx-dataset/perch_v2.onnx \
+PERCH_LR_MODEL_PATH=/kaggle/input/你的model-dataset/PerchLR.joblib \
+MAMBA_MODEL_PATH=/kaggle/input/你的model-dataset/PerchMamba.joblib \
+ATTENTION_MODEL_PATH=/kaggle/input/你的model-dataset/PerchAttn.joblib \
+SSM_MODEL_PATH=/kaggle/input/你的model-dataset/PerchSSM.joblib \
+STAGE3_MODEL_ROOT=/kaggle/input/你的model-dataset/CNN \
+RAW_WAVE_MODEL_ROOT=/kaggle/input/你的model-dataset/Waveform \
+BLEND_MODE=family3 \
+MAMBA_TTA_OFFSETS="-1,1" \
+STAGE3_TTA_OFFSETS="-0.5,0.5" \
+FILE_SCALE_MODE=topk_mean \
+FILE_SCALE_VALUE=2 \
+BATCH_FILES=16 \
+RUNTIME_NUM_THREADS=4 \
+OUTPUT_PATH=/kaggle/working/submission.csv \
+/kaggle/working/run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+必须指定这些：
+
+PERCH_ONNX_PATH
+PERCH_LR_MODEL_PATH
+MAMBA_MODEL_PATH
+ATTENTION_MODEL_PATH
+SSM_MODEL_PATH
+STAGE3_MODEL_ROOT
+RAW_WAVE_MODEL_ROOT
+BLEND_MODE=family3
+MAMBA_TTA_OFFSETS="-1,1"
+STAGE3_TTA_OFFSETS="-0.5,0.5"
+这版权重 wrapper 已默认设置好了，不手动传也可以：
+
+perch_lr=0.22625
+mamba=0.1465
+stage3=0.13575
+attention=0.1465
+raw_wave=0.095
+ssm=0.25
+如果你想先 debug 10 个文件测速，加上：
+
+DEBUG=1 DEBUG_LIMIT=10
+但正式提交时不要开 DEBUG。
+
+
+
+Sunday 7:25 PM
+Traceback (most recent call last):
+  File "/kaggle/working/birdclef2026_kaggle_infer_unified_perch_stage3.py", line 76, in <module>
+    import birdclef2026_perch_sequence_ssm_train as ssm_train
+  File "/kaggle/working/birdclef2026_perch_sequence_ssm_train.py", line 29, in <module>
+    from birdclef2026_perch_context_train import (
+  File "/kaggle/working/birdclef2026_perch_context_train.py", line 30, in <module>
+    from sklearn.decomposition import PCA
+  File "/usr/local/lib/python3.12/dist-packages/sklearn/__init__.py", line 73, in <module>
+    from .base import clone  # noqa: E402
+    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/sklearn/base.py", line 19, in <module>
+    from .utils._estimator_html_repr import _HTMLDocumentationLinkMixin, estimator_html_repr
+  File "/usr/local/lib/python3.12/dist-packages/sklearn/utils/__init__.py", line 15, in <module>
+    from ._chunking import gen_batches, gen_even_slices
+  File "/usr/local/lib/python3.12/dist-packages/sklearn/utils/_chunking.py", line 11, in <module>
+    from ._param_validation import Interval, validate_params
+  File "/usr/local/lib/python3.12/dist-packages/sklearn/utils/_param_validation.py", line 14, in <module>
+    from scipy.sparse import csr_matrix, issparse
+  File "/usr/local/lib/python3.12/dist-packages/scipy/sparse/__init__.py", line 304, in <module>
+    from ._base import *
+  File "/usr/local/lib/python3.12/dist-packages/scipy/sparse/_base.py", line 8, in <module>
+    from ._sputils import (asmatrix, check_reshape_kwargs, check_shape,
+  File "/usr/local/lib/python3.12/dist-packages/scipy/sparse/_sputils.py", line 10, in <module>
+    from scipy._lib._util import np_long, np_ulong
+  File "/usr/local/lib/python3.12/dist-packages/scipy/_lib/_util.py", line 14, in <module>
+    from scipy._lib._array_api import (Array, array_namespace, is_lazy_array,
+  File "/usr/local/lib/python3.12/dist-packages/scipy/_lib/_array_api.py", line 25, in <module>
+    from scipy._lib.array_api_compat import (
+  File "/usr/local/lib/python3.12/dist-packages/scipy/_lib/array_api_compat/numpy/__init__.py", line 4, in <module>
+    from numpy import *  # noqa: F403  # pyright: ignore[reportWildcardImportFromLibrary]
+    ^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1410, in _handle_fromlist
+  File "<frozen importlib._bootstrap>", line 1412, in _handle_fromlist
+  File "/usr/local/lib/python3.12/dist-packages/numpy/__init__.py", line 748, in __getattr__
+    import numpy.char as char
+  File "/usr/local/lib/python3.12/dist-packages/numpy/char/__init__.py", line 1, in <module>
+    from numpy._core.defchararray import *
+  File "/usr/local/lib/python3.12/dist-packages/numpy/core/defchararray.py", line 5, in __getattr__
+    ret = getattr(defchararray, attr_name, None)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/numpy/core/defchararray.py", line 5, in __getattr__
+    ret = getattr(defchararray, attr_name, None)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/dist-packages/numpy/core/defchararray.py", line 5, in __getattr__
+    ret = getattr(defchararray, attr_name, None)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  [Previous line repeated 899 more times]
+  File "/usr/local/lib/python3.12/dist-packages/numpy/core/defchararray.py", line 2, in __getattr__
+    from numpy._core import defchararray
+  File "<frozen importlib._bootstrap>", line 1415, in _handle_fromlist
+RecursionError: maximum recursion depth exceeded
+
+
+这是线上的报错
+
+Show more
+Sunday 7:32 PM
+
+
+Worked for 7m 21s
+线上报错原因是：统一推理脚本启动时导入了 birdclef2026_perch_sequence_ssm_train.py，它又导入 sklearn/scipy/numpy，在 Kaggle Python 3.12 环境里触发了 numpy.defchararray 递归错误。
+
+我已经修好了：birdclef2026_kaggle_infer_unified_perch_stage3.py
+
+改动是：
+
+把 ProtoSSMHead / SelectiveSSM / TemporalCrossAttention 放进统一推理脚本内部，线上不再导入 SSM 训练脚本。
+把 AudioMAE 改成用到时才导入，避免未启用分支也污染环境。
+修正 numpy._core 兼容逻辑，避免 Kaggle 新 numpy 下错误 alias 到 defchararray。
+验证已通过：
+
+python -m py_compile birdclef2026_kaggle_infer_unified_perch_stage3.py
+bash -n run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+你现在只需要重新上传最新版 birdclef2026_kaggle_infer_unified_perch_stage3.py，然后用原来的线上命令重跑即可。birdclef2026_perch_sequence_ssm_train.py 这次不再是统一推理必需依赖。
+
+
+Edited birdclef2026_kaggle_infer_unified_perch_stage3.py
++325
+-14
+Undo
+Review
+现在如果我们要试OpenVINO，我需要为你准备哪些环境
+Sunday 10:03 PM
+
+
+Worked for 53s
+要试 OpenVINO，你需要准备两套环境：本地转换环境 + Kaggle 推理环境。
+
+本地环境
+在我们当前 transformers 环境里装：
+
+pip install openvino onnx
+官方现在推荐 Python 里直接 pip install openvino，并用下面命令验证：
+
+python -c "from openvino import Core; print(Core().available_devices)"
+如果输出里有 CPU，就说明能跑 OpenVINO Runtime。官方文档也说 ONNX 可以直接给 OpenVINO 转换/加载，PyTorch 通常先导出 ONNX 再转 OpenVINO IR。参考：OpenVINO PyPI 安装文档、模型转换文档。
+https://docs.openvino.ai/2026/get-started/install-openvino/install-openvino-pip.html
+https://docs.openvino.ai/2024/openvino-workflow/model-preparation.html
+
+Kaggle 环境
+你需要确认 Kaggle 上能不能：
+
+python -c "from openvino import Core; print(Core().available_devices)"
+如果 Kaggle 已经有 OpenVINO，最好。
+如果没有，就需要你准备一个 Kaggle Dataset，里面放 OpenVINO wheel 包，然后线上用离线方式安装，例如：
+
+pip install --no-index --find-links /kaggle/input/openvino-wheels openvino
+我们最需要你准备的东西
+优先顺序如下：
+
+一个能在本地安装 openvino 的环境。
+Kaggle 上确认是否能 import openvino。
+如果 Kaggle 不能直接 import，就准备 openvino 离线 wheel dataset。
+保留当前 Stage3 CNN 权重目录，因为我会优先尝试把 Stage3 CNN 转成 OpenVINO。
+准备一个 Kaggle debug 测试目录，10 个 soundscape 足够，用来比较 PyTorch vs OpenVINO 输出差异和耗时。
+我建议第一刀先做 Stage3 CNN -> ONNX -> OpenVINO IR。Perch ONNX 也可以试 OpenVINO 直接加载，但 Perch 输出有 embedding / spatial_embedding / label 三个输出，我们要更仔细验证数值一致性。Stage3 更独立，风险更小。
+
+
+
+Sunday 10:04 PM
+
+1 selection
+这一版的提交出现了Out of memory，发生了什么
+Sunday 10:08 PM
+
+
+Worked for 15s
+这次 OOM 大概率是我给你的 BATCH_FILES=32 太激进了。抱歉，这个提速建议在 Kaggle 内存约束下不够稳。
+
+发生了什么：
+
+BATCH_FILES=32 时，Perch ONNX 一次会处理：
+
+32 files * 12 windows/file = 384 个 5s clip
+每个 clip 是 [160000] float32，光输入 batch 就约：
+
+384 * 160000 * 4 bytes ≈ 246 MB
+但真正吃内存的是 Perch ONNX 中间激活、spatial_embedding 输出、ONNXRuntime workspace、以及后面同时保留 mean/flat64 两套 spatial tokens、embedding、raw_scores。Kaggle CPU 内存上限比较紧，所以 batch 太大会直接 OOM。
+
+下一版建议用保守命令：
+
+PYTHON_BIN=python \
+COMPETITION_ROOT=/kaggle/input/competitions/birdclef-2026 \
+PERCH_DIR=/kaggle/input/birdclef2026-perch/Perch \
+PERCH_ONNX_PATH=/kaggle/input/你的perch-onnx-dataset/perch_v2.onnx \
+PERCH_LR_MODEL_PATH=/kaggle/input/你的model-dataset/PerchLR.joblib \
+MAMBA_MODEL_PATH=/kaggle/input/你的model-dataset/PerchMamba.joblib \
+ATTENTION_MODEL_PATH=/kaggle/input/你的model-dataset/PerchAttn.joblib \
+SSM_MODEL_PATH=/kaggle/input/你的model-dataset/PerchSSM.joblib \
+STAGE3_MODEL_ROOT=/kaggle/input/你的model-dataset/CNN \
+RAW_WAVE_MODEL_ROOT="" \
+MAMBA_TTA_OFFSETS="" \
+STAGE3_TTA_OFFSETS="" \
+BLEND_MODE=family3 \
+FILE_SCALE_MODE=topk_mean \
+FILE_SCALE_VALUE=2 \
+BATCH_FILES=8 \
+STAGE3_SEGMENT_BATCH_SIZE=8 \
+RUNTIME_NUM_THREADS=2 \
+OUTPUT_PATH=/kaggle/working/submission.csv \
+/kaggle/working/run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+如果 BATCH_FILES=8 还 OOM，就降到 4。CV 不变，只有速度变慢；这版本地 CV 仍是 0.937399。现在优先保证“能完整跑完”。
+
+
+
+Sunday 10:09 PM
+我已经安装了openvino与onnx，请你帮我试试能提速多少
+Sunday 10:19 PM
+
+
+Worked for 13m 28s
+我已经试完并接入了 Stage3 CNN 的 OpenVINO 后端。
+
+结果：
+
+Perch ONNX -> OpenVINO: 失败
+原因：当前 perch_v2.onnx 里有 RDFT / dynamic shape / ReduceL2 等节点，OpenVINO 2024.4 直接转换不过。
+
+Stage3 CNN -> OpenVINO: 成功
+数值误差：max_abs_diff ≈ 6.7e-6，基本一致。
+速度对比，10 个 soundscape，共 120 个 5s segment，3 fold Stage3 ensemble，只看 CNN forward：
+
+PyTorch CPU forward: 约 9.7s
+OpenVINO CPU forward: 约 2.0s
+Stage3 forward 约 4.8x 加速
+完整 Stage3 OpenVINO smoke，包括转换/编译 3 个 fold、渲染 spectrogram、推理 10 个文件：
+
+约 8.7s
+我已经把开关接进去了：
+
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+线上使用时加这个环境变量即可：
+
+STAGE3_BACKEND=openvino
+建议下一次用这版命令，继续避免 OOM：
+
+STAGE3_BACKEND=openvino \
+BATCH_FILES=8 \
+STAGE3_SEGMENT_BATCH_SIZE=8 \
+RUNTIME_NUM_THREADS=2 \
+RAW_WAVE_MODEL_ROOT="" \
+MAMBA_TTA_OFFSETS="" \
+STAGE3_TTA_OFFSETS="" \
+BLEND_MODE=family3 \
+/kaggle/working/run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+整体总耗时不会 4.8x，因为 Perch 仍然是大头；但 Stage3 这部分会明显变快，预计能节省一截时间。
+
+
+Edited 2 files
++154
+-2
+Undo
+Review
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+
+Sunday 10:32 PM
+使用了openvino的部分快了多少倍
+Sunday 10:33 PM
+
+只看我们成功接入的 Stage3 CNN forward 部分：
+
+PyTorch CPU:   约 9.7s / 10 files
+OpenVINO CPU: 约 2.0s / 10 files
+所以 Stage3 CNN 的模型 forward 大约快了：
+
+9.7 / 2.0 ≈ 4.8 倍
+但注意这是 Stage3 CNN forward，不是整套提交。整套提交里还有 Perch ONNX、Perch LR/Mamba/Attention/SSM、音频读取、spectrogram 渲染、后处理等，所以总耗时不会快 4.8 倍。OpenVINO 主要是在 Stage3 分支上省时间。
+
+
+
+Sunday 10:33 PM
+我们来试试之前的family3 = 0.942178这一版，请你看看openvino能提速多少倍
+Sunday 10:41 PM
+
+
+Worked for 4m 35s
+我跑了 family3 = 0.942178 那条重配置的 10 files debug：
+
+配置包含：
+
+Perch LR + Mamba + Attention + SSM + Stage3 + RawWave
+Mamba TTA = -1, +1
+Stage3 TTA = -0.5, +0.5
+BLEND_MODE = family3
+OpenVINO 版完整耗时：
+
+total: 81.7s / 10 files
+seconds_per_file_total: 8.17s
+分项耗时：
+
+perch_shared_onnx: 17.0s
+mamba_tta_extra: 29.6s
+stage3_cnn openvino: 12.8s
+raw_wave: 19.5s
+其他: 很少
+OpenVINO 实际提速部分主要是 Stage3 CNN：
+
+Stage3 forward 单独测：
+PyTorch CPU:   约 9.7s / 120 segments
+OpenVINO CPU: 约 2.0s / 120 segments
+=> forward 约 4.8x 加速
+但整套 family3=0.942178 里，最大头其实是：
+
+Perch 原始 + Mamba TTA: 约 46.6s
+RawWave: 约 19.5s
+Stage3 OpenVINO: 约 12.8s
+所以整套 pipeline 不会快 4.8 倍。粗略估计，OpenVINO 对整套重版大概只能提速 1.1x ~ 1.2x，因为它只加速 Stage3，没加速 Perch TTA 和 RawWave。
+
+结论：OpenVINO 有用，但救不了 0.942178 重版的主要瓶颈。真正卡时间的是 Mamba TTA 和 RawWave。
+
+
+
+Sunday 10:45 PM
+
+RawWave为什么不加openvino？请你将能加openvino的部分都加入openvino实现最大的提速
+Sunday 10:49 PM
+
+
+Worked for 6m 48s
+RawWave 之前没先加，是因为它比 Stage3 转换风险更高；现在我已经试通并接入了。
+
+已加入 OpenVINO 的部分：
+
+Stage3 CNN: 已支持 STAGE3_BACKEND=openvino
+RawWave: 已支持 RAW_WAVE_BACKEND=openvino
+Perch ONNX 暂时不能直接 OpenVINO，转换会失败在 RDFT / dynamic shape / ReduceL2 等节点上。
+
+重版 family3=0.942178，10 files debug 结果：
+
+Stage3 + RawWave 都用 OpenVINO:
+total: 72.6s
+seconds_per_file_total: 7.26s
+之前只开 Stage3 OpenVINO、RawWave 仍用 torch：
+
+total: 81.7s
+seconds_per_file_total: 8.17s
+所以当前整套重版从 81.7s -> 72.6s，整体约：
+
+81.7 / 72.6 ≈ 1.13x
+RawWave 单独 forward 部分：
+
+PyTorch CPU:   约 18.0s / 120 segments
+OpenVINO CPU: 约 4.8s / 120 segments
+=> 约 3.7x
+现在命令里加：
+
+STAGE3_BACKEND=openvino \
+RAW_WAVE_BACKEND=openvino
+即可。最大瓶颈仍然是 Perch + Mamba TTA，这部分 OpenVINO 暂时救不了。
+
+
+Edited 2 files
++101
+-1
+Undo
+Review
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+
+Sunday 10:56 PM
+RawWave为什么不加openvino？请你将能加openvino的部分都加入openvino实现最大的提速
+Sunday 10:49 PM
+
+
+Worked for 6m 48s
+RawWave 之前没先加，是因为它比 Stage3 转换风险更高；现在我已经试通并接入了。
+
+已加入 OpenVINO 的部分：
+
+Stage3 CNN: 已支持 STAGE3_BACKEND=openvino
+RawWave: 已支持 RAW_WAVE_BACKEND=openvino
+Perch ONNX 暂时不能直接 OpenVINO，转换会失败在 RDFT / dynamic shape / ReduceL2 等节点上。
+
+重版 family3=0.942178，10 files debug 结果：
+
+Stage3 + RawWave 都用 OpenVINO:
+total: 72.6s
+seconds_per_file_total: 7.26s
+之前只开 Stage3 OpenVINO、RawWave 仍用 torch：
+
+total: 81.7s
+seconds_per_file_total: 8.17s
+所以当前整套重版从 81.7s -> 72.6s，整体约：
+
+81.7 / 72.6 ≈ 1.13x
+RawWave 单独 forward 部分：
+
+PyTorch CPU:   约 18.0s / 120 segments
+OpenVINO CPU: 约 4.8s / 120 segments
+=> 约 3.7x
+现在命令里加：
+
+STAGE3_BACKEND=openvino \
+RAW_WAVE_BACKEND=openvino
+即可。最大瓶颈仍然是 Perch + Mamba TTA，这部分 OpenVINO 暂时救不了。
+
+
+Edited 2 files
++101
+-1
+Undo
+Review
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+
+
+Sunday 10:56 PM
+所以现在已经是将能使用openvino的都使用了得到的数据是吧
+Sunday 11:08 PM
+
+是的，目前我们已经把能稳定转 OpenVINO、且数值一致的部分都接上了：
+
+Stage3 CNN -> OpenVINO 成功
+RawWave -> OpenVINO 成功
+Perch ONNX -> OpenVINO 失败，暂时不能用
+Perch 后面的 LR/Mamba/Attention/SSM head 本身很轻，不是主要瓶颈，没必要 OpenVINO
+所以现在的 family3=0.942178 重版，已经是“可用 OpenVINO 的分支都用 OpenVINO”的测速结果：
+
+10 files total: 72.6s
+seconds_per_file_total: 7.26s
+但这版仍然慢，主要瓶颈还是：
+
+Perch 原始推理: 14.1s
+Mamba TTA 额外两次 Perch: 29.6s
+合计 Perch 相关约 43.7s / 10 files
+也就是说，OpenVINO 已经尽力了，接下来想再快，只能减少 Mamba TTA、减 RawWave、或降低 batch/分支配置来避免 OOM/超时。
+
+
+
+Sunday 11:08 PM
+在线上怎么使用openvino，你已经把代码编写好了吗
+Sunday 11:09 PM
+
+是的，代码已经写好了。线上只需要上传最新版这两个文件：
+
+birdclef2026_kaggle_infer_unified_perch_stage3.py
+run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+然后在 Kaggle 命令里加这两个环境变量：
+
+STAGE3_BACKEND=openvino \
+RAW_WAVE_BACKEND=openvino \
+完整重版命令大概是：
+
+PYTHON_BIN=python \
+COMPETITION_ROOT=/kaggle/input/competitions/birdclef-2026 \
+PERCH_DIR=/kaggle/input/birdclef2026-perch/Perch \
+PERCH_ONNX_PATH=/kaggle/input/你的perch-onnx-dataset/perch_v2.onnx \
+PERCH_LR_MODEL_PATH=/kaggle/input/你的model-dataset/PerchLR.joblib \
+MAMBA_MODEL_PATH=/kaggle/input/你的model-dataset/PerchMamba.joblib \
+ATTENTION_MODEL_PATH=/kaggle/input/你的model-dataset/PerchAttn.joblib \
+SSM_MODEL_PATH=/kaggle/input/你的model-dataset/PerchSSM.joblib \
+STAGE3_MODEL_ROOT=/kaggle/input/你的model-dataset/CNN \
+RAW_WAVE_MODEL_ROOT=/kaggle/input/你的model-dataset/Waveform \
+STAGE3_BACKEND=openvino \
+RAW_WAVE_BACKEND=openvino \
+MAMBA_TTA_OFFSETS="-1,1" \
+STAGE3_TTA_OFFSETS="-0.5,0.5" \
+BLEND_MODE=family3 \
+FILE_SCALE_MODE=topk_mean \
+FILE_SCALE_VALUE=2 \
+BATCH_FILES=8 \
+STAGE3_SEGMENT_BATCH_SIZE=8 \
+RAW_WAVE_SEGMENT_BATCH_SIZE=8 \
+RUNTIME_NUM_THREADS=2 \
+OUTPUT_PATH=/kaggle/working/submission.csv \
+/kaggle/working/run_birdclef2026_unified_perch_stage3_kaggle_infer.sh
+前提是 Kaggle 环境里能：
+
+python -c "import openvino"
+如果 Kaggle 没有 openvino，需要先用离线 wheel dataset 安装它。
+
+
+
+Sunday 11:09 PM
+现在线上的环境只需要有openvino库就行吧，需要onnx库吗
+Sunday 11:12 PM
+
+线上跑我们现在这版 不需要 onnx 库。
+
+原因是：
+
+Stage3 CNN -> OpenVINO 走的是 openvino.convert_model(torch_model, example_input=...)
+RawWave -> OpenVINO 也是直接从 PyTorch module 转 OpenVINO
+我们没有在线上导出/读取 ONNX
+Perch 仍然用 onnxruntime 跑原来的 perch_v2.onnx
+所以线上需要：
+
+必须有：openvino
+必须有：onnxruntime
+不需要：onnx
+你可以在 Kaggle 里检查：
+
+python -c "import openvino; import onnxruntime; print('ok')"
+如果这句能过，就够了。
+
+
+
+Sunday 11:12 PM
+
+Sunday 11:12 PM
+
+1 selection
+这个是我们的family3=0.942178的线上推理对吧
+Sunday 11:22 PM
+
+是的，这条命令对应的就是我们本地 family3 = 0.942178 那版线上推理配置，区别只是现在把可用的两个重分支换成了 OpenVINO：
+
+Perch LR
+Perch Mamba
+Perch Attention
+Perch SSM
+Stage3 CNN, OpenVINO
+RawWave, OpenVINO
+Mamba TTA = -1, +1
+Stage3 TTA = -0.5, +0.5
+blend = family3
+file_scale_topk = 2
+本地 CV 口径仍对应 0.942178，OpenVINO 只改推理后端，不改模型输出逻辑。数值误差很小，不应影响分数。

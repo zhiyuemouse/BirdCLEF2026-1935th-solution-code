@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+CUDA_VISIBLE_DEVICES=0
+SEED=2026
+
+export PYTHONHASHSEED="${SEED}"
+export CUBLAS_WORKSPACE_CONFIG=":4096:8"
+
+MODEL_NAME="convnextv2_atto.fcmae_ft_in1k"
+HEAD_TYPE="csiro_conv_v1"
+HEAD_POOL_TYPE="avg"
+STAGE1_EPOCHS=12
+STAGE2_EPOCHS=28
+STAGE1_BATCH_SIZE=8
+STAGE2_BATCH_SIZE=8
+STAGE1_BACKBONE_LR=1e-4
+STAGE1_HEAD_LR=1e-3
+STAGE2_BACKBONE_LR=5e-5
+STAGE2_HEAD_LR=5e-4
+
+# Stage 1 only: add deduplicated BirdCLEF2025 train_audio rows whose primary
+# labels exist in the 2026 taxonomy. Stage 1 valid and Stage 2 CV stay 2026-only.
+BIRDCLEF2025_ROOT="BirdCLEF2025-Dataset"
+BIRDCLEF2025_STAGE1_MAX_ROWS=-1
+BIRDCLEF2025_STAGE1_MAX_PER_LABEL=120
+
+MIXUP_ALPHA=0.0
+MIXUP_PROB=0.0
+CUTMIX_ALPHA=0.0
+CUTMIX_PROB=0.0
+MIXUP_DOMAIN="waveform"
+
+STAGE1_MIXUP_ALPHA=0.20
+STAGE1_MIXUP_PROB=0.10
+STAGE1_CUTMIX_ALPHA=0.0
+STAGE1_CUTMIX_PROB=0.0
+
+STAGE2_MIXUP_ALPHA=0.0
+STAGE2_MIXUP_PROB=0.0
+STAGE2_CUTMIX_ALPHA=0.0
+STAGE2_CUTMIX_PROB=0.0
+
+cmd=(
+  python birdclef2026_gm_train.py
+  --model-name "${MODEL_NAME}"
+  --head-type "${HEAD_TYPE}"
+  --head-pool-type "${HEAD_POOL_TYPE}"
+  --use-birdclef2025-stage1
+  --birdclef2025-root "${BIRDCLEF2025_ROOT}"
+  --birdclef2025-stage1-max-rows "${BIRDCLEF2025_STAGE1_MAX_ROWS}"
+  --birdclef2025-stage1-max-per-label "${BIRDCLEF2025_STAGE1_MAX_PER_LABEL}"
+  --seed "${SEED}"
+  --stage1-epochs "${STAGE1_EPOCHS}"
+  --stage2-epochs "${STAGE2_EPOCHS}"
+  --stage1-batch-size "${STAGE1_BATCH_SIZE}"
+  --stage2-batch-size "${STAGE2_BATCH_SIZE}"
+  --stage1-backbone-lr "${STAGE1_BACKBONE_LR}"
+  --stage1-head-lr "${STAGE1_HEAD_LR}"
+  --stage2-backbone-lr "${STAGE2_BACKBONE_LR}"
+  --stage2-head-lr "${STAGE2_HEAD_LR}"
+  --mixup-alpha "${MIXUP_ALPHA}"
+  --mixup-prob "${MIXUP_PROB}"
+  --cutmix-alpha "${CUTMIX_ALPHA}"
+  --cutmix-prob "${CUTMIX_PROB}"
+  --mixup-domain "${MIXUP_DOMAIN}"
+  --stage1-mixup-alpha "${STAGE1_MIXUP_ALPHA}"
+  --stage1-mixup-prob "${STAGE1_MIXUP_PROB}"
+  --stage1-cutmix-alpha "${STAGE1_CUTMIX_ALPHA}"
+  --stage1-cutmix-prob "${STAGE1_CUTMIX_PROB}"
+  --stage2-mixup-alpha "${STAGE2_MIXUP_ALPHA}"
+  --stage2-mixup-prob "${STAGE2_MIXUP_PROB}"
+  --stage2-cutmix-alpha "${STAGE2_CUTMIX_ALPHA}"
+  --stage2-cutmix-prob "${STAGE2_CUTMIX_PROB}"
+)
+
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}" "${cmd[@]}"
