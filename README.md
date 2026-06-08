@@ -21,8 +21,6 @@ Stage3 TTA disabled
 The final submission prioritized CPU runtime stability. Heavier local-CV configurations using RawWave and TTA were not used because they timed out or were too risky online.
 
 ## Main Files
-
-- `我的其他的比赛编写的解决方案/BirdCLEF2026-1935th-solution.md`: full solution write-up.
 - `birdclef2026_kaggle_infer_unified_perch_stage3.py`: final unified Kaggle inference script.
 - `run_birdclef2026_unified_perch_stage3_kaggle_infer.sh`: final inference wrapper.
 - `birdclef2026_gm_train.py`: CNN training script.

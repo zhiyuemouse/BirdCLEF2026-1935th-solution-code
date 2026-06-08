@@ -22,7 +22,6 @@ Stage3 TTA disabled
 
 ### Solution Notes
 
-- `我的其他的比赛编写的解决方案/BirdCLEF2026-1935th-solution.md`
 - `CV-LB.md`
 - `MEMORY.md`
 - `history.txt`
